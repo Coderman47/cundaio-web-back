@@ -1,0 +1,7 @@
+.aws-sam
+.env
+.env.json
+env
+venv
+.vscode
+**/__pycache__

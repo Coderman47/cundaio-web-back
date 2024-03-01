@@ -1,0 +1,31 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "web-back-sam"
+region = "us-east-1"
+debug = false
+
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
+
+[default.validate.parameters]
+lint = true
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+resolve_s3 = true
+s3_prefix = "web-back-sam"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+image_repositories = []
+tags = "application=web-back-sam"
+
+[default.sync.parameters]
+watch = true
+tags = "application=web-back-sam"
+
+[default.logs.parameters]
+tail = true

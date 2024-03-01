@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  web-back
+
+Parameters:
+  DbSecret:
+    Type: String
+    Default: /postgres-free/DB_SECRET
+    Description: Name of the secret containing the database credentials
+
+Globals: # https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-specification-template-anatomy-globals.html
+  Function:
+    Architectures:
+      - x86_64
+    Timeout: 60
+    MemorySize: 128
+    Runtime: python3.11
+    Tracing: Active
+    
+Resources:
+  ### API Gateway ###
+  RestAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      PropagateTags: true
+      StageName: Prod
+      TracingEnabled: true
+      Auth:
+        DefaultAuthorizer: LambdaAuthorizer
+        Authorizers:
+          LambdaAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - Authorization
+              ReauthorizeEvery: 0
+      Cors:
+        AllowMethods: "'OPTIONS,POST,GET'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  ### Lambda Authorizer ###
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties: 
+      Handler: src/api/functions/auth/authorizer.lambda_handler
+      Description: Lambda Authorizer function
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Layers:
+        - Ref: CommonLayer
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: PowertoolsAuthorizer
+          POWERTOOLS_METRICS_NAMESPACE: Powertools
+          LOG_LEVEL: INFO
+          JWT_SECRET: '{{resolve:secretsmanager:JWT_SECRET:SecretString:JWT_SECRET_KEY}}'
+
+  ### Lambda Functions ###
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/functions/health_check/app.lambda_handler
+      Description: Health Check function
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Layers:
+        - Ref: CommonLayer
+      Events:
+        HealthCheckPath:
+          Type: Api
+          Properties:
+            Path: /health_check
+            Method: GET
+            RestApiId:
+              Ref: RestAPI
+            Auth:
+              Authorizer: NONE
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: PowertoolsHealthCheck
+          POWERTOOLS_METRICS_NAMESPACE: Powertools
+          LOG_LEVEL: INFO
+
+  ThreadsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: threads.lambda_handler
+      CodeUri: src/api/functions/app
+      Description: Handler function for openai conversations
+      Timeout: 900
+      Layers:
+        - Ref: CommonLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: PowertoolsNewConversation
+          POWERTOOLS_METRICS_NAMESPACE: Powertools
+          LOG_LEVEL: INFO
+          OPENAI_API_KEY: '{{resolve:secretsmanager:OpenAI:SecretString:API_KEY}}'
+          DB_HOST: '{{resolve:ssm:/postgres-free/DB_HOST}}'
+          DB_NAME: '{{resolve:ssm:/postgres-free/DB_NAME}}'
+          DB_SECRET: !Sub '{{resolve:ssm:${DbSecret}}}'
+          JWT_SECRET: '{{resolve:secretsmanager:JWT_SECRET:SecretString:JWT_SECRET_KEY}}'
+      Events:
+        NewThread:
+          Type: Api
+          Properties:
+            Path: /threads/new
+            Method: POST
+            Auth:
+              Authorizer: LambdaAuthorizer
+            RestApiId:
+              Ref: RestAPI
+        ListThreads:
+          Type: Api
+          Properties:
+            Path: /threads
+            Method: GET
+            Auth:
+              Authorizer: LambdaAuthorizer
+            RestApiId:
+              Ref: RestAPI
+        ListThreadMessages:
+          Type: Api
+          Properties:
+            Path: /threads/{thread_id}/messages
+            Method: GET
+            Auth:
+              Authorizer: LambdaAuthorizer
+            RestApiId:
+              Ref: RestAPI
+        NewThreadMessage:
+          Type: Api
+          Properties:
+            Path: /threads/{thread_id}/messages/new
+            Method: POST
+            Auth:
+              Authorizer: LambdaAuthorizer
+            RestApiId:
+              Ref: RestAPI
+
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties: 
+      Handler: src/api/functions/auth/auth.lambda_handler
+      Description: Function that handles user registration and login
+      Layers:
+        - Ref: CommonLayer
+      Events:
+        UserRegister:
+          Type: Api
+          Properties:
+            Path: /register
+            Method: POST
+            Auth:
+              Authorizer: NONE
+            RestApiId: !Ref RestAPI
+        UserLogin:
+          Type: Api
+          Properties:
+            Path: /login
+            Method: POST
+            Auth:
+              Authorizer: NONE
+            RestApiId: !Ref RestAPI
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: PowertoolsRegisterUser
+          POWERTOOLS_METRICS_NAMESPACE: Powertools
+          LOG_LEVEL: INFO
+          DB_HOST: '{{resolve:ssm:/postgres-free/DB_HOST}}'
+          DB_NAME: '{{resolve:ssm:/postgres-free/DB_NAME}}'
+          DB_SECRET: !Sub '{{resolve:ssm:${DbSecret}}}'
+          JWT_SECRET: '{{resolve:secretsmanager:JWT_SECRET:SecretString:JWT_SECRET_KEY}}'
+  
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+        LayerName: !Sub "${AWS::StackName}-CommonLayer"
+        Description: Shared utilities for services
+        ContentUri: src/api/layers/common/
+        CompatibleRuntimes:
+          - python3.11
+    Metadata:
+      BuildMethod: python3.11
+
+  4XXGatewayResponse:
+    Type: "AWS::ApiGateway::GatewayResponse"
+    Properties: 
+      ResponseParameters: 
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+      ResponseType: "DEFAULT_4XX"
+      RestApiId: 
+        Ref: RestAPI
+  
+  5XXGatewayResponse:
+    Type: "AWS::ApiGateway::GatewayResponse"
+    Properties: 
+      ResponseParameters: 
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+      ResponseType: "DEFAULT_5XX"
+      RestApiId: 
+        Ref: RestAPI
+
+  ### Roles ###
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: SecretManagerGetOpenAIAPIKeyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*"
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Ref: ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+
+Outputs:
+  APIHealthCheck:
+    Description: API Gateway endpoint URL for Prod environment for Health Check Function
+    Value: !Sub "https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod/health_check"
+
+  APIEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod"
